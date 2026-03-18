@@ -115,7 +115,7 @@ class PCN(nn.Module):
             zs_0_t = [z.clone().detach().requires_grad_(True) for z in zs_0]    # Copy of initial state
             zs_0_pred_t = []    # Predictions
             for idx, backbone_module in enumerate(self.backbone_module_list):
-                zs_0_pred_t.append(backbone_module(zs_0_t[idx]))    # Generates predictions of next layer with current layer
+                zs_0_pred_t.append(backbone_module(zs_0_t[idx]))    # Generates predictions of next layer with current layer zs_00
 
             pc_loss = torch.sum((zs_state_t[0] - zs_0_t[0])**2) # Input layer loss
             for idx, backbone_module in enumerate(self.backbone_module_list):

@@ -53,8 +53,8 @@ test_transform = transforms.Compose([
     transforms.Normalize(args.mean, args.std),
 ])
 
-train_ds = datasets.CIFAR10(args.data_dir, train=True, download=True, transform=train_transform)
-test_ds = datasets.CIFAR10(args.data_dir, train=False, download=True, transform=test_transform)
+train_ds = datasets.MovingMNIST(args.data_dir, train=True, download=True, transform=train_transform)
+test_ds = datasets.MovingMNIST(args.data_dir, train=False, download=True, transform=test_transform)
 train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
@@ -67,17 +67,21 @@ class tPCN(nn.Module):
             'relu': nn.ReLU(),
             'tanh': nn.Tanh(),
             'sigmoid': nn.Sigmoid(),
-            'none': nn.Identity() # 아무 연산도 하지 않음 (Linear만 남음)
+            'identity': nn.Identity()
         }
         activation_layer = act_dict.get(args.activation.lower(), nn.ReLU())
 
+        # Input/Sensory Prediction: z_{k} -> x_{k}
         self.input_predictor = nn.Sequential(
             nn.Linear(512 * 4 * 4, 10),
-            activation_layer)
+            activation_layer
+        )
         
+        # Temporal Prediction: z_{k-1} -> z_{k}
         self.temporal_predictor = nn.Sequential(
             nn.Linear(512 * 4 * 4, 10),
-            activation_layer)
+            activation_layer
+        )
 
     def forward(self, x, y, optimizer):
         if self.args.z_init == 'ff':
@@ -95,14 +99,12 @@ class tPCN(nn.Module):
             'pred': r,
         }
 
-    def forward_train(self, zs_t, zs_0, x, y, k, t, optimizer):
+    def inference_step(self, z_t, z_prev, x, k, t, optimizer):
         """Computes gradients for a single inference step
 
         Args:
-            zs_t (list[torch.Tensor]): Current values for each layer at iteration t.
-            zs_0 (list[torch.Tensor]): Initial values for each layer.
-            x (torch.Tensor): Input data (Batch Size, 3, 32, 32).
-            y (torch.Tensor): Target labels (Batch Size).
+            z_t (torch.Tensor): Current values for each layer at iteration t.
+            x (torch.Tensor): Input data (Batch Size, Sequence length, 3, 32, 32).
             k (int): Current input index.
             t (int): Current inference step (0 ~ T-1).
             optimizer (torch.optim.Optimizer): optimizer for model weight updates.
@@ -114,45 +116,51 @@ class tPCN(nn.Module):
         """
         optimizer.zero_grad()
         with torch.enable_grad():
-            zs_state_t = [z.clone().detach().requires_grad_(True) for z in zs_t]    # Copy of state
-            zs_0_t = [z.clone().detach().requires_grad_(True) for z in zs_0]    # Copy of initial state
-            zs_0_pred_t = []    # Predictions
-            for idx, backbone_module in enumerate(self.backbone_module_list):
-                zs_0_pred_t.append(backbone_module(zs_0_t[idx]))    # Generates predictions of next layer with current layer
+            z_state_t = z_t.clone().detach().requires_grad_(True)  # Copy of state
+            z_0_t = z_t.clone().detach().requires_grad_(True)  # Copy of initial state
 
-            pc_loss = torch.sum((zs_state_t[0] - zs_0_t[0])**2) # Input layer loss
-            for idx, backbone_module in enumerate(self.backbone_module_list):
-                if idx != len(self.backbone_module_list) - 1:
-                    pc_loss += torch.sum((zs_state_t[idx+1] - zs_0_pred_t[idx])**2) # Prediction loss for each layer
-                else:
-                    pc_loss += torch.nn.functional.cross_entropy(zs_state_t[-1], y)     # Classification loss
-                    pc_loss += torch.nn.functional.cross_entropy(zs_0_pred_t[-1], y)    # Prediction loss for last layer
+            x_pred_t = self.input_predictor(z_0_t)   
+            z_pred_t = self.temporal_predictor(z_0_t)
+
+            # 1. Input prediction loss
+            pc_loss = torch.sum((x_pred_t - x)**2) # Input prediction loss
+
+            # 2. Temporal prediction error
+            if k > 0:
+                z_pred_t = self.temporal_predictor(z_prev)
+                pc_loss += torch.sum((z_pred_t)**2)
 
             pc_loss.backward() # Compute gradients
 
-            delta_zs_t = [torch.zeros_like(z) for z in zs_state_t]
-            for idx in range(1, len(zs_state_t)):
-                delta_zs_t[idx] = - zs_state_t[idx].grad * self.args.eta
-                if idx != len(zs_state_t) - 1:
-                    delta_zs_t[idx] += - zs_0_t[idx].grad * self.args.eta
+            delta_zs_t = - z_state_t.grad * self.args.eta - z_0_t.grad
 
         if t == self.args.T - 1:    # When at last inference step, updates weights (??why here??)
             optimizer.step()
 
         return delta_zs_t, pc_loss
 
-    def forward_ff(self, x, y, optimizer):
-        '''Performs the entire iterative inference stage
+    def forward_training(self, seq, optimizer):
+        '''Performs the entire iterative inference for current sequence
         '''
-        zs_t = self.init_zs_ff(x, y)
-        zs_0 = [z.clone().detach().requires_grad_(True) for z in zs_t]
+        preds = []
         pc_loss_list = []
-        for t in range(self.args.T):    # Iterates for T inference steps
-            delta_zs_t, pc_loss = self.forward_train(zs_t, zs_0, x, y, t, optimizer)
-            zs_t = [z + delta_z for z, delta_z in zip(zs_t, delta_zs_t)]    # updates states
-            pc_loss_list.append(pc_loss.item())
+
+        batch_size = seq.size(0)
+        seq_len = seq.size(1)
+        z_k = torch.zeros(batch_size, self.hidden_size).to(self.args.device) # Initialized as 0
+
+        for k in range(seq_len):
+            x_k = seq[:, k, :]
+            z_k_t = z_k.detach().requires_grad_(True) 
+            pc_loss_list.append([])
+            for t in range(self.args.T):    # Iterates for T inference steps
+                delta_z_t, pc_loss = self.inference_step(z_k_t, x_k, t, optimizer)
+                z_k_t += delta_z_t   # Updates states
+                pc_loss_list[k].append(pc_loss.item())
+
+            preds.append(self.input_predictor(z_k_t))    # Use conversed hidden state to make final prediction
         return {
-            'pred': zs_t[-1], 
+            'preds': preds, 
             'pc_loss': pc_loss,
             'pc_loss_list': pc_loss_list    # Log of all pc_loss
         }
@@ -173,6 +181,8 @@ train_losses, test_losses = [], []
 train_accs, test_accs = [], []
 
 def train_one_epoch():
+    '''TODO - rewrite for sequential
+    '''
     pcn.train()
     total_loss = 0
     correct = 0
