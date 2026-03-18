@@ -14,8 +14,9 @@ args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 args.z_init = 'ff'
 args.update_rule = 'pcn'
 args.backbone = 'vgg13'
+args.activation = 'relu'
 args.eta = 0.2
-args.T = 20
+args.T = 20 # Number of inference steps
 args.data_dir = os.path.expanduser('~/datasets')
 args.batch_size = 128
 args.epochs = 100
@@ -57,17 +58,26 @@ test_ds = datasets.CIFAR10(args.data_dir, train=False, download=True, transform=
 train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-class PCN(nn.Module):
+class tPCN(nn.Module):
     def __init__(self, args):
-        super(PCN, self).__init__()
+        super(tPCN, self).__init__()
         self.args = args
-        self.input_processor = nn.Sequential(
-            nn.Conv2d(3,128,3,1,1), 
-            nn.ReLU(inplace=True),
-            nn.Flatten(), 
-            nn.Linear(512 * 4 * 4, 10)) # fix all dims
+
+        act_dict = {
+            'relu': nn.ReLU(),
+            'tanh': nn.Tanh(),
+            'sigmoid': nn.Sigmoid(),
+            'none': nn.Identity() # 아무 연산도 하지 않음 (Linear만 남음)
+        }
+        activation_layer = act_dict.get(args.activation.lower(), nn.ReLU())
+
+        self.input_predictor = nn.Sequential(
+            nn.Linear(512 * 4 * 4, 10),
+            activation_layer)
         
-        self.temporal_predictor = nn.Linear(512, 512)
+        self.temporal_predictor = nn.Sequential(
+            nn.Linear(512 * 4 * 4, 10),
+            activation_layer)
 
     def forward(self, x, y, optimizer):
         if self.args.z_init == 'ff':
@@ -85,7 +95,7 @@ class PCN(nn.Module):
             'pred': r,
         }
 
-    def forward_train(self, zs_t, zs_0, x, y, t, optimizer):
+    def forward_train(self, zs_t, zs_0, x, y, k, t, optimizer):
         """Computes gradients for a single inference step
 
         Args:
@@ -93,7 +103,8 @@ class PCN(nn.Module):
             zs_0 (list[torch.Tensor]): Initial values for each layer.
             x (torch.Tensor): Input data (Batch Size, 3, 32, 32).
             y (torch.Tensor): Target labels (Batch Size).
-            t (int): 현재 최적화 반복 횟수 (0 ~ T-1).
+            k (int): Current input index.
+            t (int): Current inference step (0 ~ T-1).
             optimizer (torch.optim.Optimizer): optimizer for model weight updates.
 
         Returns:
@@ -155,7 +166,7 @@ class PCN(nn.Module):
             zs.append(r)
         return zs
 
-pcn = PCN(args).to(args.device)
+pcn = tPCN(args).to(args.device)
 optimizer = torch.optim.AdamW(pcn.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 train_losses, test_losses = [], []
