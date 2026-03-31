@@ -39,13 +39,14 @@ class tPCN(nn.Module):
         return z_pred, x_pred
     
     def inference(self, x_k, z_prev, optimizer):
+        z = self.temporal_predictor(z_prev)
+
         for t in range(self.args.T):
-            optimizer.zero_grad()
             with torch.enable_grad():
                 z = z.clone().detach().requires_grad_(True)
 
                 z_pred = self.temporal_predictor(z_prev)
-                x_pred = self.input_predictor(z_pred)   
+                x_pred = self.input_predictor(z)   
 
                 # 1. Input prediction loss
                 pc_loss = torch.sum((x_k - x_pred)**2)
