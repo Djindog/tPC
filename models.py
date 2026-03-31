@@ -29,7 +29,42 @@ class tPCN(nn.Module):
             activation_layer
         )
 
-    def forward(self, data, optimizer):
+        # Classifier: z_{k} -> y
+        self.classifier = nn.Linear(args.hidden_shape, 10)
+
+    def forward(self, z_prev):
+        z_pred = self.temporal_predictor(z_prev)
+        x_pred = self.input_predictor(z_pred) 
+                
+        return z_pred, x_pred
+    
+    def inference(self, x_k, z_prev, optimizer):
+        for t in range(self.args.T):
+            optimizer.zero_grad()
+            with torch.enable_grad():
+                z = z.clone().detach().requires_grad_(True)
+
+                z_pred = self.temporal_predictor(z_prev)
+                x_pred = self.input_predictor(z_pred)   
+
+                # 1. Input prediction loss
+                pc_loss = torch.sum((x_k - x_pred)**2)
+
+                # 2. Temporal prediction error
+                pc_loss += torch.sum((z - z_pred)**2)
+
+                # pc_loss_list[k].append(pc_loss.item()) # Log loss
+
+                pc_loss.backward() # Compute gradients
+
+            with torch.no_grad():
+                z = z - self.args.eta * z.grad
+                z_prev = z.detach() # Fixed prediction assumption?
+
+        return 
+        
+    
+    def forward_train(self, data, optimizer):
         '''Performs the entire iterative inference for current sequence
         '''
         preds = []
@@ -66,7 +101,7 @@ class tPCN(nn.Module):
 
                 with torch.no_grad():
                     z = z - self.args.eta * z.grad
-                    z_prev = z.clone().detach() # Fixed prediction assumption?
+                    z_prev = z.detach() # Fixed prediction assumption?
 
             preds.append(x_pred)    # Log final prediction
             with torch.no_grad():   # Initialize next inference with predicted z

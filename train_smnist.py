@@ -18,7 +18,7 @@ def train(model, device, train_loader, optimizer, epoch):
         data, target = data.to(device), target.to(device)
         
         optimizer.zero_grad()
-        output, pc_loss = model(data)
+        output, pc_loss = model(data, target)
 
         # 통계치 계산
         test_loss += pc_loss.item() * data.size(0)
@@ -41,7 +41,7 @@ def test(model, device, test_loader):
             data, target = data.to(device), target.to(device)
             data = data.view(-1, 784, 1)
             
-            output, pc_loss = model(data)
+            output, pc_loss = model(data, target)
             test_loss += pc_loss.item() * data.size(0)
             pred = output.argmax(dim=1, keepdim=True) 
             correct += pred.eq(target.view_as(pred)).sum().item()
@@ -64,8 +64,9 @@ args.num_classes = 10
 args.num_workers = 4
 args.optimizer = 'adamw'
 
-args.hidden_shape =
-args.input_shape = 
+args.hidden_shape = (1, 64)
+args.input_shape = (1, 28, 28)
+args.output_shape = (1, 10)
 
 model = tPCN(args).to(args.device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
